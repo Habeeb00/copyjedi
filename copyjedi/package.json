@@ -1,0 +1,80 @@
+{
+  "name": "copyjedi",
+  "displayName": "CopyJedi",
+  "description": "Track your copy-paste habits in VSCode",
+  "version": "0.1.0",
+  "publisher": "YourPublisherName",
+  "engines": {
+    "vscode": "^1.60.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./src/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "copyjedi.toggleTracking",
+        "title": "CopyJedi: Toggle Paste Tracking"
+      },
+      {
+        "command": "copyjedi.resetStats",
+        "title": "CopyJedi: Reset Paste Statistics"
+      },
+      {
+        "command": "copyjedi.submitToLeaderboard",
+        "title": "CopyJedi: Submit to Leaderboard"
+      }
+    ],
+    "configuration": {
+      "title": "CopyJedi",
+      "properties": {
+        "copyjedi.enableNotifications": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable notifications when content is pasted"
+        },
+        "copyjedi.autoResetDaily": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically reset statistics at the start of each new day"
+        },
+        "copyjedi.leaderboardEnabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable submission to the global leaderboard"
+        },
+        "copyjedi.leaderboardApiUrl": {
+          "type": "string",
+          "default": "",
+          "description": "API URL for the global leaderboard"
+        },
+        "copyjedi.leaderboardServerUrl": {
+          "type": "string",
+          "default": "http://localhost:3000",
+          "description": "URL for the CopyJedi leaderboard server"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "lint": "eslint .",
+    "pretest": "npm run lint",
+    "test": "node ./test/runTest.js"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.60.0",
+    "@types/glob": "^7.1.4",
+    "@types/mocha": "^9.0.0",
+    "@types/node": "14.x",
+    "eslint": "^7.32.0",
+    "glob": "^7.1.7",
+    "mocha": "^9.1.1",
+    "typescript": "^4.4.3",
+    "@vscode/test-electron": "^1.6.2",
+    "node-fetch": "^2.6.1"
+  }
+}
