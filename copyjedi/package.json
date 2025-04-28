@@ -30,12 +30,20 @@
         "title": "CopyJedi: Submit to Leaderboard"
       },
       {
+        "command": "copyjedi.configureLeaderboard",
+        "title": "CopyJedi: Configure Leaderboard Server"
+      },
+      {
         "command": "copyjedi.test",
         "title": "CopyJedi: Test Extension"
       },
       {
         "command": "copyjedi.syncNow",
         "title": "CopyJedi: Sync Stats to Leaderboard Now"
+      },
+      {
+        "command": "copyjedi.checkServer",
+        "title": "CopyJedi: Check Leaderboard Server Status"
       }
     ],
     "configuration": {
@@ -75,6 +83,11 @@
           "type": "number",
           "default": 5,
           "description": "How often to sync paste statistics (in minutes)"
+        },
+        "copyjedi.debugMode": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable debug logging for CopyJedi"
         }
       }
     }
