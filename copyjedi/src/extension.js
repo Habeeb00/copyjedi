@@ -3,6 +3,33 @@ const vscode = require("vscode");
 const fs = require("fs");
 const path = require("path");
 
+// Add this at the top of your extension.js
+// If you're having issues with the built-in fetch
+let fetch;
+try {
+  fetch = globalThis.fetch || require("node-fetch");
+} catch (e) {
+  const nodeFetch = require("node-fetch");
+  fetch = nodeFetch.default || nodeFetch;
+}
+
+// Fix the fetch implementation
+function fixedFetch(url, options) {
+  // Use a try-catch to handle different environments
+  try {
+    if (typeof globalThis.fetch === "function") {
+      return globalThis.fetch(url, options);
+    } else {
+      const nodeFetch = require("node-fetch");
+      return nodeFetch(url, options);
+    }
+  } catch (e) {
+    log(`Error setting up fetch: ${e.message}`);
+    const nodeFetch = require("node-fetch");
+    return nodeFetch(url, options);
+  }
+}
+
 // Add this at the top of your file
 const outputChannel = vscode.window.createOutputChannel("CopyJedi");
 
@@ -24,6 +51,7 @@ let isTracking = true; // Start tracking by default
 let statusBarItem;
 let pasteEventDisposable;
 let globalStoragePath;
+let lastEditTime = Date.now();
 
 // File to store persistent data
 const getStoragePath = () => {
@@ -116,7 +144,7 @@ const savePasteStats = () => {
   try {
     const storagePath = getStoragePath();
     fs.writeFileSync(storagePath, JSON.stringify(pasteStats), "utf8");
-    
+
     // Log where stats are being saved to help with debugging
     console.log(`CopyJedi stats saved to: ${storagePath}`);
     log(`Stats file updated: ${JSON.stringify(pasteStats)}`);
@@ -131,6 +159,14 @@ const savePasteStats = () => {
 const generateUserId = () => {
   return "user_" + Math.random().toString(36).substr(2, 9);
 };
+function hasCodePatterns(text) {
+  // Simple check for common code patterns
+  return (
+    /function|const|let|var|import|export|if|for|while|class|=>|return/i.test(
+      text
+    ) || /[{}\[\]();=+\-*/%]/.test(text)
+  );
+}
 
 // Initialize the status bar item
 const initializeStatusBar = (context) => {
@@ -150,11 +186,15 @@ const updateStatusBar = () => {
   if (statusBarItem) {
     // Add more visibility to the status bar
     statusBarItem.text = `$(clippy) Pastes: ${pasteStats.totalPastes} | Lines: ${pasteStats.totalLinesPasted}`;
-    statusBarItem.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
+    statusBarItem.backgroundColor = new vscode.ThemeColor(
+      "statusBarItem.warningBackground"
+    );
     statusBarItem.show();
-    
+
     // Log when status bar updates
-    log(`Status bar updated - Pastes: ${pasteStats.totalPastes}, Lines: ${pasteStats.totalLinesPasted}`);
+    log(
+      `Status bar updated - Pastes: ${pasteStats.totalPastes}, Lines: ${pasteStats.totalLinesPasted}`
+    );
   }
 };
 
@@ -201,15 +241,24 @@ const setupPasteTracking = async (context) => {
             // 1. Text is substantial (multiple lines or reasonably long)
             // 2. The clipboard content matches or mostly matches what was inserted
             // 3. The change happened very quickly (not character by character)
-            
-            const isProbablyPaste = 
-                // Must have substantial content to be a paste
-                (change.text.length > 20 || change.text.includes('\n')) &&
-                // And either it's multiple lines OR the change was made at once (not char by char)
-                (change.text.split('\n').length > 1 || 
-                 (change.range && 
-                  Math.abs(change.range.end.character - change.range.start.character) > 5));
-                
+
+            const isProbablyPaste =
+              // Must have substantial content to be a paste
+              (change.text.length > 15 || change.text.includes("\n")) &&
+              // And either it's multiple lines OR the change was made at once (not char by char)
+              (change.text.split("\n").length > 1 ||
+                (change.range &&
+                  Math.abs(
+                    change.range.end.character - change.range.start.character
+                  ) > 5)) &&
+              // Not likely to be common typing patterns
+              !/^\s*[{}\[\]();:,.]+\s*$/.test(change.text) &&
+              // Fast change indicates paste rather than typing
+              Date.now() - lastEditTime < 100;
+
+            // Update the timestamp at the beginning of your event handler
+            lastEditTime = Date.now();
+            hasCodePatterns(change.text);
             if (isProbablyPaste) {
               // Count pasted lines
               const lineCount = change.text.split("\n").length;
@@ -217,10 +266,10 @@ const setupPasteTracking = async (context) => {
               // Update statistics
               pasteStats.totalPastes++;
               pasteStats.totalLinesPasted += lineCount;
-              
+
               // Make sure to save stats after each update
               savePasteStats();
-              
+
               // Update the status bar immediately
               updateStatusBar();
 
@@ -277,6 +326,37 @@ const resetStats = () => {
   vscode.window.showInformationMessage("CopyJedi: Statistics reset");
 };
 
+let syncStatusItem;
+
+function updateSyncStatus(status) {
+  if (!syncStatusItem) {
+    syncStatusItem = vscode.window.createStatusBarItem(
+      vscode.StatusBarAlignment.Right,
+      99
+    );
+    syncStatusItem.show();
+  }
+
+  if (status === "syncing") {
+    syncStatusItem.text = `$(sync~spin) Syncing...`;
+    syncStatusItem.tooltip = "CopyJedi is syncing data to leaderboard";
+  } else if (status === "success") {
+    syncStatusItem.text = `$(check) Synced`;
+    syncStatusItem.tooltip = `Last sync: ${new Date().toLocaleTimeString()}`;
+    // Reset after 3 seconds
+    setTimeout(() => {
+      syncStatusItem.text = `$(sync) Sync: ${new Date().toLocaleTimeString()}`;
+    }, 3000);
+  } else if (status === "error") {
+    syncStatusItem.text = `$(error) Sync Failed`;
+    syncStatusItem.tooltip = "CopyJedi failed to sync data";
+    // Reset after 3 seconds
+    setTimeout(() => {
+      syncStatusItem.text = `$(sync) Sync: ${new Date().toLocaleTimeString()}`;
+    }, 3000);
+  }
+}
+
 const submitToLeaderboard = async () => {
   // Get server URL from settings or use default
   const config = vscode.workspace.getConfiguration("copyjedi");
@@ -287,13 +367,11 @@ const submitToLeaderboard = async () => {
   const os = process.platform;
   const vsCodeVersion = vscode.version;
 
-  vscode.window.showInformationMessage(
-    `CopyJedi: Submitting stats to leaderboard (User ID: ${pasteStats.userId})`
-  );
+  log(`Submitting to leaderboard at: ${serverUrl}/api/submit`);
 
   try {
-    // Make API call to your server using the axios module (you'll need to install it)
-    const response = await fetch(`${serverUrl}/api/submit`, {
+    // Use the fixed fetch implementation
+    const response = await fixedFetch(`${serverUrl}/api/submit`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -309,28 +387,102 @@ const submitToLeaderboard = async () => {
     });
 
     if (response.ok) {
-      vscode.window.showInformationMessage(
-        "CopyJedi: Stats submitted to leaderboard!"
-      );
+      log("Sync successful");
+      // Only show notification for manual syncs, not auto-syncs
+      // vscode.window.showInformationMessage("CopyJedi: Stats submitted to leaderboard!");
+      return true;
     } else {
       const text = await response.text();
+      log(`Error response: ${text}`);
       vscode.window.showErrorMessage(
         `CopyJedi: Failed to submit stats - ${text}`
+      );
+      return false;
+    }
+  } catch (error) {
+    log(`Fetch error in submitToLeaderboard: ${error.message}`);
+    log(`Error stack: ${error.stack}`);
+    vscode.window.showErrorMessage(
+      `CopyJedi: Error submitting to leaderboard - ${error.message}`
+    );
+    return false;
+  }
+};
+
+// Add this command to see recent MongoDB updates
+vscode.commands.registerCommand("copyjedi.checkSyncStatus", async () => {
+  try {
+    const config = vscode.workspace.getConfiguration("copyjedi");
+    const serverUrl =
+      config.get("leaderboardServerUrl") || "http://localhost:3000";
+
+    vscode.window.showInformationMessage("Checking MongoDB sync status...");
+
+    const response = await fetch(
+      `${serverUrl}/api/syncStatus/${pasteStats.userId}`
+    );
+    const data = await response.json();
+
+    if (response.ok) {
+      const lastSync = new Date(data.lastSync).toLocaleString();
+      vscode.window.showInformationMessage(
+        `Last successful sync: ${lastSync} (${data.timeSinceLastSync} ago)`
+      );
+      outputChannel.appendLine(`Sync status check - Last update: ${lastSync}`);
+      outputChannel.show();
+    } else {
+      vscode.window.showErrorMessage(
+        `Error checking sync status: ${data.message}`
       );
     }
   } catch (error) {
     vscode.window.showErrorMessage(
-      `CopyJedi: Error submitting to leaderboard - ${error.message}`
+      `Error checking sync status: ${error.message}`
     );
   }
-};
+});
+
+// In extension.js - add this near the top with your other imports
+const SYNC_INTERVAL_MS = 10 * 1000; // 10 seconds for testing
+
+// Add this function to periodically sync data
+function startAutoSync(context) {
+  log("Starting automatic sync to leaderboard");
+
+  // Initial sync after a short delay
+  const initialSyncTimeout = setTimeout(() => {
+    log("Running initial sync to leaderboard");
+    submitToLeaderboard().catch((err) => {
+      log(`Initial sync failed: ${err.message}`);
+    });
+  }, 30000); // Wait 30 seconds after startup
+
+  // Register periodic sync
+  const syncInterval = setInterval(() => {
+    log("Running scheduled sync to leaderboard");
+    submitToLeaderboard().catch((err) => {
+      log(`Scheduled sync failed: ${err.message}`);
+    });
+  }, SYNC_INTERVAL_MS);
+
+  // Make sure we clean up the interval when the extension is deactivated
+  context.subscriptions.push({
+    dispose: () => {
+      clearTimeout(initialSyncTimeout);
+      clearInterval(syncInterval);
+      log("Auto sync stopped due to extension deactivation");
+    },
+  });
+
+  return syncInterval;
+}
 
 // Activate the extension
 function activate(context) {
   try {
     // Show activation notification
     vscode.window.showInformationMessage("CopyJedi is now activating!");
-    
+
     globalStoragePath = context.globalStoragePath;
 
     // Create directory if it doesn't exist
@@ -355,6 +507,32 @@ function activate(context) {
     // Setup paste tracking
     setupPasteTracking(context);
 
+    // Start the automatic sync process
+    startAutoSync(context);
+
+    // Add a command to manually trigger sync
+    const syncCommand = vscode.commands.registerCommand(
+      "copyjedi.syncNow",
+      () => {
+        vscode.window.showInformationMessage(
+          "CopyJedi: Manually syncing to leaderboard..."
+        );
+        submitToLeaderboard()
+          .then(() => {
+            vscode.window.showInformationMessage(
+              "CopyJedi: Manual sync completed!"
+            );
+          })
+          .catch((err) => {
+            vscode.window.showErrorMessage(
+              `CopyJedi: Manual sync failed - ${err.message}`
+            );
+          });
+      }
+    );
+
+    context.subscriptions.push(syncCommand);
+
     // Register commands
     context.subscriptions.push(
       vscode.commands.registerCommand(
@@ -375,25 +553,31 @@ function activate(context) {
         const storagePath = getStoragePath();
         try {
           if (fs.existsSync(storagePath)) {
-            const statsData = fs.readFileSync(storagePath, 'utf8');
-            vscode.window.showInformationMessage(`CopyJedi backend is working! Stats file exists at: ${storagePath}`);
-            
+            const statsData = fs.readFileSync(storagePath, "utf8");
+            vscode.window.showInformationMessage(
+              `CopyJedi backend is working! Stats file exists at: ${storagePath}`
+            );
+
             // Show stats in a message
             const stats = JSON.parse(statsData);
             vscode.window.showInformationMessage(
               `Current stats: ${stats.totalPastes} pastes, ${stats.totalLinesPasted} lines, User ID: ${stats.userId}`
             );
-            
+
             // Log to output channel too
             log(`Backend verification - stats file contents: ${statsData}`);
-            
+
             // Open the output channel to make logs visible
             outputChannel.show();
           } else {
-            vscode.window.showWarningMessage(`CopyJedi stats file not found at: ${storagePath}`);
+            vscode.window.showWarningMessage(
+              `CopyJedi stats file not found at: ${storagePath}`
+            );
           }
         } catch (error) {
-          vscode.window.showErrorMessage(`CopyJedi backend check failed: ${error.message}`);
+          vscode.window.showErrorMessage(
+            `CopyJedi backend check failed: ${error.message}`
+          );
         }
       })
     );
@@ -402,9 +586,11 @@ function activate(context) {
     updateStatusBar();
 
     log("CopyJedi activation completed successfully");
-    
+
     // Show successful activation notification
-    vscode.window.showInformationMessage("CopyJedi activated successfully and is tracking your pastes!");
+    vscode.window.showInformationMessage(
+      "CopyJedi activated successfully and is tracking your pastes!"
+    );
   } catch (error) {
     log(`Activation error: ${error.message}`);
     log(`Stack trace: ${error.stack}`);
@@ -425,5 +611,3 @@ module.exports = {
   activate,
   deactivate,
 };
-
-

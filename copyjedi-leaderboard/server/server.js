@@ -2,6 +2,8 @@ require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
 const mongoose = require("mongoose");
+const path = require("path");
+const rateLimit = require("express-rate-limit");
 const app = express();
 const port = process.env.PORT || 3000;
 
@@ -47,13 +49,65 @@ const PasteStatsSchema = new mongoose.Schema({
 
 const PasteStats = mongoose.model("PasteStats", PasteStatsSchema);
 
+// Add this to your server.js after initializing MongoDB
+async function monitorChanges() {
+  try {
+    const changeStream = PasteStats.watch();
+
+    changeStream.on("change", (change) => {
+      console.log(
+        `[${new Date().toLocaleTimeString()}] Database change detected:`,
+        change.operationType
+      );
+
+      // Log details about the update
+      if (change.operationType === "update") {
+        console.log(`Updated user: ${change.documentKey._id}`);
+        console.log(
+          "Fields updated:",
+          Object.keys(change.updateDescription.updatedFields)
+        );
+      }
+    });
+
+    console.log("MongoDB change stream monitoring enabled");
+  } catch (error) {
+    console.error("Failed to set up change stream:", error);
+  }
+}
+
+monitorChanges().catch(console.error);
+
 // Middleware
 app.use(
   cors({
-    origin: ["http://localhost:3000", "https://your-production-domain.com"],
+    origin: "*", // Allow all origins during development
   })
 );
 app.use(express.json());
+
+// Add this before your routes
+app.use((req, res, next) => {
+  try {
+    next();
+  } catch (error) {
+    console.error("Route error:", error);
+    res.status(500).send("Server error");
+  }
+});
+
+// Rate limiter middleware
+const apiLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100, // limit each IP to 100 requests per windowMs
+  message: "Too many requests from this IP, please try again later",
+});
+
+// Apply to all API endpoints
+app.use("/api/", apiLimiter);
+
+// Serve static files from the React app
+app.use(express.static(path.join(__dirname, "../client/build")));
 
 // API Routes
 
@@ -63,15 +117,7 @@ app.post("/api/submit", async (req, res) => {
     const { userId, totalPastes, totalLinesPasted, date, os, vsCodeVersion } =
       req.body;
 
-    if (
-      !userId ||
-      totalPastes === undefined ||
-      totalLinesPasted === undefined
-    ) {
-      return res.status(400).json({ error: "Missing required fields" });
-    }
-
-    // Find or create user stats
+    // Find or create the user
     let userStats = await PasteStats.findOne({ userId });
 
     if (!userStats) {
@@ -79,44 +125,46 @@ app.post("/api/submit", async (req, res) => {
         userId,
         totalPastes,
         totalLinesPasted,
-        dailyStats: [
-          {
-            date,
-            pastes: totalPastes,
-            lines: totalLinesPasted,
-          },
-        ],
         os,
         vsCodeVersion,
+        date,
       });
     } else {
-      // Update existing stats
+      // Update existing record
       userStats.totalPastes = totalPastes;
       userStats.totalLinesPasted = totalLinesPasted;
       userStats.lastActive = new Date();
 
-      // Update OS and VSCode version if provided
+      // Update OS and VS Code version if provided
       if (os) userStats.os = os;
       if (vsCodeVersion) userStats.vsCodeVersion = vsCodeVersion;
 
-      // Add or update daily stats
-      const dailyStatIndex = userStats.dailyStats.findIndex(
-        (stat) => stat.date === date
+      // Optional: Update daily stats
+      const today = new Date().toISOString().split("T")[0];
+      const existingDayIndex = userStats.dailyStats.findIndex(
+        (item) => item.date === today
       );
-      if (dailyStatIndex >= 0) {
-        userStats.dailyStats[dailyStatIndex].pastes = totalPastes;
-        userStats.dailyStats[dailyStatIndex].lines = totalLinesPasted;
+
+      if (existingDayIndex >= 0) {
+        userStats.dailyStats[existingDayIndex].pastes = totalPastes;
+        userStats.dailyStats[existingDayIndex].lines = totalLinesPasted;
       } else {
         userStats.dailyStats.push({
-          date,
+          date: today,
           pastes: totalPastes,
           lines: totalLinesPasted,
         });
+        // Keep only the last 30 days of daily stats
+        if (userStats.dailyStats.length > 30) {
+          userStats.dailyStats = userStats.dailyStats.slice(-30);
+        }
       }
     }
 
+    // Save to database with upsert
     await userStats.save();
-    res.status(200).json({ success: true });
+
+    res.status(200).json({ message: "Stats saved successfully" });
   } catch (error) {
     console.error("Error submitting stats:", error);
     res.status(500).json({ error: "Server error" });
@@ -256,6 +304,163 @@ app.get("/api/stats", async (req, res) => {
     console.error("Error fetching global stats:", error);
     res.status(500).json({ error: "Server error" });
   }
+});
+
+// Add this code to help debug the connection issue
+
+// Update your submitToLeaderboard function to add error details
+
+// Add this to your server.js
+app.get("/", (req, res) => {
+  res.send(`
+    <html>
+      <head>
+        <title>CopyJedi Leaderboard</title>
+        <style>
+          /* styles unchanged */
+        </style>
+      </head>
+      <body>
+        <h1>CopyJedi Leaderboard</h1>
+        <p>Visit <a href="/leaderboard">/leaderboard</a> to see the full statistics.</p>
+        <p>API endpoints:</p>
+        <ul>
+          <li><a href="/api/stats">/api/stats</a> - Global statistics</li>
+          <li><a href="/api/leaderboard">/api/leaderboard</a> - Top users</li>
+        </ul>
+      </body>
+    </html>
+  `);
+});
+
+// Add this route to display a simple leaderboard
+app.get("/leaderboard", async (req, res) => {
+  try {
+    const users = await PasteStats.find().sort({ totalPastes: -1 }).limit(10);
+
+    const stats = await PasteStats.aggregate([
+      {
+        $group: {
+          _id: null,
+          totalUsers: { $sum: 1 },
+          globalPastes: { $sum: "$totalPastes" },
+          globalLines: { $sum: "$totalLinesPasted" },
+          avgPastesPerUser: { $avg: "$totalPastes" },
+          avgLinesPerUser: { $avg: "$totalLinesPasted" },
+        },
+      },
+    ]);
+
+    const globalStats =
+      stats.length > 0
+        ? stats[0]
+        : {
+            totalUsers: 0,
+            globalPastes: 0,
+            globalLines: 0,
+            avgPastesPerUser: 0,
+            avgLinesPerUser: 0,
+          };
+
+    res.send(`
+      <html>
+        <head>
+          <title>CopyJedi Leaderboard</title>
+          <style>
+            body { font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
+            h1, h2 { color: #2C974B; }
+            .stats { background-color: #f5f5f5; padding: 15px; border-radius: 5px; margin-bottom: 20px; }
+            table { width: 100%; border-collapse: collapse; }
+            th, td { text-align: left; padding: 8px; border-bottom: 1px solid #ddd; }
+            th { background-color: #2C974B; color: white; }
+            tr:nth-child(even) { background-color: #f9f9f9; }
+            tr:hover { background-color: #f1f1f1; }
+          </style>
+        </head>
+        <body>
+          <h1>CopyJedi Leaderboard</h1>
+          
+          <h2>Global Statistics</h2>
+          <div class="stats">
+            <p>Total Users: ${globalStats.totalUsers}</p>
+            <p>Total Pastes: ${globalStats.globalPastes}</p>
+            <p>Total Lines Pasted: ${globalStats.globalLines}</p>
+            <p>Average Pastes Per User: ${
+              Math.round(globalStats.avgPastesPerUser * 10) / 10
+            }</p>
+            <p>Average Lines Per User: ${
+              Math.round(globalStats.avgLinesPerUser * 10) / 10
+            }</p>
+          </div>
+          
+          <h2>Top Users</h2>
+          <table>
+            <tr>
+              <th>Rank</th>
+              <th>User</th>
+              <th>Pastes</th>
+              <th>Lines</th>
+              <th>Last Active</th>
+              <th>OS</th>
+            </tr>
+            ${users
+              .map(
+                (user, index) => `
+              <tr>
+                <td>${index + 1}</td>
+                <td>${user.username || user.userId}</td>
+                <td>${user.totalPastes}</td>
+                <td>${user.totalLinesPasted}</td>
+                <td>${new Date(user.lastActive).toLocaleString()}</td>
+                <td>${user.os || "Unknown"}</td>
+              </tr>
+            `
+              )
+              .join("")}
+          </table>
+        </body>
+      </html>
+    `);
+  } catch (error) {
+    console.error("Error generating leaderboard:", error);
+    res.status(500).send("Error generating leaderboard");
+  }
+});
+
+// Add this route to check sync status
+app.get("/api/syncStatus/:userId", async (req, res) => {
+  try {
+    const { userId } = req.params;
+
+    const userStats = await PasteStats.findOne({ userId });
+
+    if (!userStats) {
+      return res.status(404).json({
+        message: "User not found",
+      });
+    }
+
+    const lastSync = userStats.lastActive;
+    const now = new Date();
+    const timeSinceLastSync = Math.round((now - lastSync) / 1000);
+
+    return res.status(200).json({
+      lastSync,
+      timeSinceLastSync: `${timeSinceLastSync} seconds`,
+      lastStats: {
+        totalPastes: userStats.totalPastes,
+        totalLinesPasted: userStats.totalLinesPasted,
+      },
+    });
+  } catch (error) {
+    console.error("Error checking sync status:", error);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+// Replace your catchall handler with this simpler version
+app.use((req, res) => {
+  res.sendFile(path.join(__dirname, "../client/build/index.html"));
 });
 
 // Start server

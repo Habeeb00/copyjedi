@@ -32,6 +32,10 @@
       {
         "command": "copyjedi.test",
         "title": "CopyJedi: Test Extension"
+      },
+      {
+        "command": "copyjedi.syncNow",
+        "title": "CopyJedi: Sync Stats to Leaderboard Now"
       }
     ],
     "configuration": {
@@ -60,7 +64,17 @@
         "copyjedi.leaderboardServerUrl": {
           "type": "string",
           "default": "http://localhost:3000",
-          "description": "URL for the CopyJedi leaderboard server"
+          "description": "URL of the CopyJedi leaderboard server"
+        },
+        "copyjedi.autoSync": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically sync paste statistics to the leaderboard"
+        },
+        "copyjedi.syncInterval": {
+          "type": "number",
+          "default": 5,
+          "description": "How often to sync paste statistics (in minutes)"
         }
       }
     }
