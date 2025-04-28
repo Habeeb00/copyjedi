@@ -95,7 +95,8 @@
   "scripts": {
     "lint": "eslint .",
     "pretest": "npm run lint",
-    "test": "node ./test/runTest.js"
+    "test": "node ./test/runTest.js",
+    "package": "vsce package --no-dependencies"
   },
   "devDependencies": {
     "@types/glob": "^7.1.4",
@@ -110,5 +111,7 @@
   },
   "dependencies": {
     "node-fetch": "^2.6.7"
-  }
+  },
+  "bundledDependencies": ["node-fetch"],
+  "extensionDependencies": []
 }

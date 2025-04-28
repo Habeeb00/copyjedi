@@ -14,25 +14,61 @@ function log(message) {
 }
 
 // Simple fetch implementation that works in both environments
-async function fixedFetch(url, options) {
+async function fixedFetch(url, options = {}) {
   try {
     log(`Making fetch request to: ${url}`);
-    // For Node.js 18+ or VSCode environment with built-in fetch
-    if (typeof globalThis.fetch === "function") {
-      return globalThis.fetch(url, options);
-    } else {
-      // Fallback for older Node.js versions - dynamically import node-fetch
-      log("Using dynamic import for node-fetch");
+
+    // Remove timeout from options and handle it separately with AbortController
+    const timeout = options.timeout || 10000;
+    delete options.timeout;
+
+    // Create an AbortController for timeout handling
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeout);
+
+    // Add the signal to options
+    options.signal = controller.signal;
+
+    // Try using the built-in fetch first (should work in VS Code)
+    try {
+      const response = await globalThis.fetch(url, options);
+      clearTimeout(timeoutId);
+      return response;
+    } catch (fetchError) {
+      clearTimeout(timeoutId);
+
+      // Check if it's a timeout error
+      if (fetchError.name === "AbortError") {
+        throw new Error(`Request timed out after ${timeout}ms`);
+      }
+
+      // If it's not a timeout error but fetch failed, try node-fetch as fallback
+      log(`Built-in fetch failed: ${fetchError.message}. Trying node-fetch...`);
+
+      // Try using require for node-fetch (common in extensions)
       try {
-        const nodeFetch = await import("node-fetch");
-        return nodeFetch.default(url, options);
-      } catch (importError) {
-        log(`Error importing node-fetch: ${importError.message}`);
-        throw new Error(`Failed to import node-fetch: ${importError.message}`);
+        // Make a new controller for the fallback request
+        const fallbackController = new AbortController();
+        const fallbackTimeoutId = setTimeout(
+          () => fallbackController.abort(),
+          timeout
+        );
+
+        // Use require instead of dynamic import in production
+        const nodeFetch = require("node-fetch");
+        options.signal = fallbackController.signal;
+
+        const response = await nodeFetch(url, options);
+        clearTimeout(fallbackTimeoutId);
+        return response;
+      } catch (nodeFetchError) {
+        log(`Node-fetch failed too: ${nodeFetchError.message}`);
+        throw nodeFetchError;
       }
     }
   } catch (e) {
     log(`Error in fetch implementation: ${e.message}`);
+    log(`Error stack: ${e.stack || "No stack available"}`);
     throw new Error(`Fetch error: ${e.message}`);
   }
 }
@@ -310,8 +346,6 @@ function isEditableDocument(document) {
 
     if (!programmingLanguages.includes(document.languageId)) {
       log(`Document language not in allowed list: ${document.languageId}`);
-      // Uncomment this for stricter filtering:
-      // return false;
     }
 
     log(`Document accepted as editable: ${document.uri.toString()}`);
@@ -852,47 +886,150 @@ function registerCommands(context) {
       "copyjedi.checkServer",
       async () => {
         try {
-          if (leaderboardClient) {
-            // Use the client's method to check availability
-            await leaderboardClient.checkServerAvailability();
-            if (!leaderboardClient.offlineMode) {
-              vscode.window.showInformationMessage(
-                "CopyJedi: Leaderboard server is online!"
-              );
-            }
-          } else {
-            const config = vscode.workspace.getConfiguration("copyjedi");
-            const serverUrl =
-              config.get("leaderboardApiUrl") ||
-              config.get("leaderboardServerUrl") ||
-              "http://localhost:3000";
+          // Show a notification to confirm the command is running
+          vscode.window.showInformationMessage(
+            "CopyJedi: Checking server connection..."
+          );
 
-            log(`Testing connection to server: ${serverUrl}`);
-            vscode.window.showInformationMessage(
-              `Checking server at: ${serverUrl}`
+          outputChannel.show(true); // Force show the output channel
+          log("============ SERVER CHECK STARTED ============");
+          log(`Extension version: 0.1.0 (Debug enabled)`);
+          log(`Running on: ${process.platform}, Node: ${process.version}`);
+
+          // Get server URL from settings
+          const config = vscode.workspace.getConfiguration("copyjedi");
+          const serverUrl =
+            config.get("leaderboardApiUrl") ||
+            config.get("leaderboardServerUrl") ||
+            "http://localhost:3000";
+
+          log(`Server URL: ${serverUrl}`);
+
+          // Try multiple test methods
+
+          // METHOD 1: Direct URL check without fetch
+          try {
+            log("METHOD 1: Testing basic URL connectivity...");
+            const http = require("http");
+            const https = require("https");
+
+            // Choose correct module based on URL
+            const protocol = serverUrl.startsWith("https") ? https : http;
+
+            // Create a simple request
+            const urlObj = new URL(serverUrl);
+            log(
+              `Connecting to ${urlObj.hostname}:${
+                urlObj.port || (urlObj.protocol === "https:" ? 443 : 80)
+              }`
             );
 
-            const response = await fixedFetch(`${serverUrl}/api/health`);
+            const reqPromise = new Promise((resolve, reject) => {
+              const req = protocol.get(urlObj, (res) => {
+                log(
+                  `METHOD 1 RESULT: Connection successful, status: ${res.statusCode}`
+                );
+                resolve(true);
+              });
+
+              req.on("error", (err) => {
+                log(`METHOD 1 ERROR: ${err.message}`);
+                reject(err);
+              });
+
+              req.setTimeout(5000, () => {
+                req.destroy(new Error("Timeout after 5000ms"));
+                log(`METHOD 1 ERROR: Connection timeout`);
+                reject(new Error("Connection timeout"));
+              });
+            });
+
+            await reqPromise;
+          } catch (method1Error) {
+            log(`METHOD 1 FAILED: ${method1Error.message}`);
+          }
+
+          // METHOD 2: Native fetch API check
+          try {
+            log("METHOD 2: Testing with built-in fetch...");
+            log(`Sending request to: ${serverUrl}/api/health`);
+
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 5000);
+
+            const response = await globalThis.fetch(`${serverUrl}/api/health`, {
+              method: "GET",
+              signal: controller.signal,
+              headers: {
+                "User-Agent": `VSCode-CopyJedi/${vscode.version}`,
+                Accept: "application/json",
+                "X-Debug-Mode": "true",
+              },
+            });
+
+            clearTimeout(timeoutId);
+
+            log(`METHOD 2 RESULT: Status: ${response.status}`);
+            const responseText = await response.text();
+            log(`Response body: ${responseText}`);
+
             if (response.ok) {
-              const data = await response.json();
-              log(`Server response: ${JSON.stringify(data)}`);
               vscode.window.showInformationMessage(
-                `CopyJedi server is working!`
+                `CopyJedi server is responding! Status: ${response.status}`
               );
 
               // Set offlineMode to false when successful
               offlineMode = false;
               updateSyncStatusBarItem();
             } else {
+              throw new Error(`Server returned error: ${response.status}`);
+            }
+          } catch (method2Error) {
+            log(`METHOD 2 FAILED: ${method2Error.message}`);
+
+            // METHOD 3: Try with node-fetch as fallback
+            try {
+              log("METHOD 3: Testing with node-fetch...");
+              const nodeFetch = require("node-fetch");
+
+              const response = await nodeFetch(`${serverUrl}/api/health`, {
+                method: "GET",
+                timeout: 5000,
+                headers: {
+                  "User-Agent": `VSCode-CopyJedi/${vscode.version}`,
+                  Accept: "application/json",
+                  "X-Debug-Mode": "true",
+                },
+              });
+
+              log(`METHOD 3 RESULT: Status: ${response.status}`);
+              const responseText = await response.text();
+              log(`Response body: ${responseText}`);
+
+              if (response.ok) {
+                vscode.window.showInformationMessage(
+                  `CopyJedi server is responding (method 3)! Status: ${response.status}`
+                );
+
+                offlineMode = false;
+                updateSyncStatusBarItem();
+              } else {
+                throw new Error(`Server returned error: ${response.status}`);
+              }
+            } catch (method3Error) {
+              log(`METHOD 3 FAILED: ${method3Error.message}`);
               vscode.window.showErrorMessage(
-                `Server returned error: ${response.status}`
+                `Server check failed with all methods. See output log for details.`
               );
               offlineMode = true;
               updateSyncStatusBarItem();
             }
           }
+
+          log("============ SERVER CHECK COMPLETED ============");
         } catch (error) {
-          log(`Server check error: ${error.message}`);
+          log(`Server check uncaught error: ${error.message}`);
+          log(`Error stack: ${error.stack}`);
           vscode.window.showErrorMessage(
             `Server check failed: ${error.message}`
           );

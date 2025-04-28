@@ -2,8 +2,9 @@
 // that can be integrated into the extension in the future
 
 const vscode = require("vscode");
-// Using node-fetch for HTTP requests in the VS Code extension environment
-const fetch = require("node-fetch");
+
+// Don't directly require node-fetch here, we'll use the extension.js fetch implementation
+// through a function we'll pass in
 
 class LeaderboardClient {
   constructor(context) {
@@ -18,6 +19,25 @@ class LeaderboardClient {
     this.lastConnectionAttempt = 0;
     this.connectionRetryInterval = 30 * 60 * 1000; // 30 minutes
     this.pendingSubmissions = []; // Store submissions when offline
+
+    // Get reference to the output channel
+    try {
+      this.outputChannel = vscode.window.createOutputChannel("CopyJedi");
+    } catch (error) {
+      console.error("Failed to create output channel:", error);
+      // Use a dummy output channel as fallback
+      this.outputChannel = {
+        appendLine: (message) => console.log(message),
+      };
+    }
+  }
+
+  // Log messages
+  log(message) {
+    console.log(message);
+    this.outputChannel.appendLine(
+      `[${new Date().toLocaleTimeString()}] ${message}`
+    );
   }
 
   // Initialize and update configuration when changed
@@ -29,7 +49,7 @@ class LeaderboardClient {
         this.apiUrl =
           this.config.get("leaderboardApiUrl") ||
           this.config.get("leaderboardServerUrl") ||
-          "https://api.copyjedi.com"; // Updated to a real endpoint
+          "https://api.copyjedi.com";
         this.enabled = this.config.get("leaderboardEnabled") || false;
 
         // Reset offline mode when configuration changes to allow retrying
@@ -39,6 +59,7 @@ class LeaderboardClient {
         ) {
           this.offlineMode = false;
           this.lastConnectionAttempt = 0;
+          this.log("Server URL changed, resetting offline status");
         }
       }
     });
@@ -48,9 +69,43 @@ class LeaderboardClient {
     this.checkServerAvailability();
   }
 
+  // Fetch function that uses the global VS Code fetch or our custom implementation
+  async fetch(url, options = {}) {
+    try {
+      // Try using VS Code's built-in fetch
+      if (typeof globalThis.fetch === "function") {
+        const controller = new AbortController();
+        const timeout = options.timeout || 10000;
+        delete options.timeout;
+
+        const timeoutId = setTimeout(() => controller.abort(), timeout);
+        options.signal = controller.signal;
+
+        try {
+          const response = await globalThis.fetch(url, options);
+          clearTimeout(timeoutId);
+          return response;
+        } catch (error) {
+          clearTimeout(timeoutId);
+          if (error.name === "AbortError") {
+            throw new Error(`Request timeout after ${timeout}ms`);
+          }
+          throw error;
+        }
+      } else {
+        // Fallback to node-fetch
+        const nodeFetch = require("node-fetch");
+        return nodeFetch(url, options);
+      }
+    } catch (e) {
+      this.log(`Error in LeaderboardClient fetch: ${e.message}`);
+      throw e;
+    }
+  }
+
   // Check if the server is available
   async checkServerAvailability() {
-    if (!this.enabled) return;
+    if (!this.enabled) return false;
 
     try {
       const now = Date.now();
@@ -59,10 +114,11 @@ class LeaderboardClient {
         this.offlineMode &&
         now - this.lastConnectionAttempt < this.connectionRetryInterval
       ) {
-        return;
+        return false;
       }
 
       this.lastConnectionAttempt = now;
+      this.log(`Checking server availability at ${this.apiUrl}`);
 
       // Try different endpoint combinations to improve connectivity detection
       let endpoints = [
@@ -76,19 +132,24 @@ class LeaderboardClient {
       // Try each endpoint until one works
       for (const endpoint of endpoints) {
         try {
-          console.log(`Trying leaderboard endpoint: ${endpoint}`);
-          const response = await fetch(endpoint, {
+          this.log(`Trying leaderboard endpoint: ${endpoint}`);
+          const response = await this.fetch(endpoint, {
             method: "GET",
             timeout: 5000, // 5 second timeout
+            headers: {
+              Accept: "application/json",
+              "User-Agent": `VSCode-CopyJedi/${vscode.version}`,
+            },
+            cache: "no-cache", // Prevent caching issues
           });
 
           if (response.ok) {
             connected = true;
-            console.log(`Connected successfully to: ${endpoint}`);
+            this.log(`Connected successfully to: ${endpoint}`);
             break;
           }
         } catch (endpointError) {
-          console.log(
+          this.log(
             `Failed to connect to ${endpoint}: ${endpointError.message}`
           );
           // Continue trying other endpoints
@@ -111,12 +172,11 @@ class LeaderboardClient {
         }
       } else {
         this.offlineMode = true;
+        this.log("All connection attempts failed, switching to offline mode");
       }
     } catch (error) {
       this.offlineMode = true;
-      console.log(
-        `CopyJedi: Leaderboard server unavailable - ${error.message}`
-      );
+      this.log(`CopyJedi: Leaderboard server unavailable - ${error.message}`);
       // Don't show notification on startup, only when user explicitly tries to use it
     }
 
@@ -142,7 +202,7 @@ class LeaderboardClient {
         this.pendingSubmissions = [];
       }
     } catch (error) {
-      console.log(`CopyJedi: Failed to submit pending data - ${error.message}`);
+      this.log(`CopyJedi: Failed to submit pending data - ${error.message}`);
     }
   }
 
@@ -185,7 +245,7 @@ class LeaderboardClient {
   // The actual server submission logic
   async submitStatsToServer(stats) {
     try {
-      const response = await fetch(`${this.apiUrl}/api/submit`, {
+      const response = await this.fetch(`${this.apiUrl}/api/submit`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -240,7 +300,7 @@ class LeaderboardClient {
     }
 
     try {
-      const response = await fetch(`${this.apiUrl}/leaderboard`);
+      const response = await this.fetch(`${this.apiUrl}/leaderboard`);
       return await response.json();
     } catch (error) {
       this.offlineMode = true;
