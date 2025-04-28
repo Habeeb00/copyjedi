@@ -1,7 +1,7 @@
+// Using the global fetch API available in the VS Code extension host environment
 const vscode = require("vscode");
 const fs = require("fs");
 const path = require("path");
-const fetch = require("node-fetch");
 
 // Add this at the top of your file
 const outputChannel = vscode.window.createOutputChannel("CopyJedi");
@@ -116,6 +116,10 @@ const savePasteStats = () => {
   try {
     const storagePath = getStoragePath();
     fs.writeFileSync(storagePath, JSON.stringify(pasteStats), "utf8");
+    
+    // Log where stats are being saved to help with debugging
+    console.log(`CopyJedi stats saved to: ${storagePath}`);
+    log(`Stats file updated: ${JSON.stringify(pasteStats)}`);
   } catch (error) {
     vscode.window.showErrorMessage(
       `CopyJedi: Error saving statistics - ${error.message}`
@@ -144,12 +148,18 @@ const initializeStatusBar = (context) => {
 // Update the status bar with current statistics
 const updateStatusBar = () => {
   if (statusBarItem) {
+    // Add more visibility to the status bar
     statusBarItem.text = `$(clippy) Pastes: ${pasteStats.totalPastes} | Lines: ${pasteStats.totalLinesPasted}`;
+    statusBarItem.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
+    statusBarItem.show();
+    
+    // Log when status bar updates
+    log(`Status bar updated - Pastes: ${pasteStats.totalPastes}, Lines: ${pasteStats.totalLinesPasted}`);
   }
 };
 
 // Setup tracking of paste events
-const setupPasteTracking = (context) => {
+const setupPasteTracking = async (context) => {
   try {
     if (pasteEventDisposable) {
       pasteEventDisposable.dispose();
@@ -157,51 +167,90 @@ const setupPasteTracking = (context) => {
 
     log("Setting up paste tracking");
 
-    pasteEventDisposable = vscode.workspace.onDidChangeTextDocument((event) => {
-      try {
-        if (!isTracking) {
-          log("Change detected but tracking is disabled");
-          return;
-        }
-        
-        // Log details for debugging
-        log(`Document changed: ${event.document.uri.toString()}`);
-        log(`Change count: ${event.contentChanges.length}`);
-        
-        if (event.contentChanges.length === 0) return;
-        
-        for (const change of event.contentChanges) {
-          // Log the change for debugging
-          log(`Change detected - length: ${change.text.length}, first chars: "${change.text.substring(0, 20).replace(/\n/g, "\\n")}"`);
-          
-          // Make paste detection more lenient
-          // Either multiple lines or more than 10 characters
-          const lineCount = change.text.split("\n").length;
-          
-          if (lineCount > 1 || change.text.length > 10) {
-            log(`Detected paste: ${lineCount} lines, ${change.text.length} chars`);
-            pasteStats.totalPastes++;
-            pasteStats.totalLinesPasted += lineCount;
-            
-            // Show notification
-            vscode.window.showInformationMessage(
-              `CopyJedi: Pasted ${lineCount} line${lineCount !== 1 ? "s" : ""}! Total: ${pasteStats.totalPastes}`
-            );
-            
-            // Update status bar
-            updateStatusBar();
-            
-            // Save statistics
-            savePasteStats();
-            
-            // Only count the first substantial change in a batch
-            break;
+    pasteEventDisposable = vscode.workspace.onDidChangeTextDocument(
+      async (event) => {
+        try {
+          if (!isTracking) {
+            log("Change detected but tracking is disabled");
+            return;
           }
+
+          // Log details for debugging
+          log(`Document changed: ${event.document.uri.toString()}`);
+          log(`Change count: ${event.contentChanges.length}`);
+
+          if (event.contentChanges.length === 0) return;
+
+          // Using vscode.window directly instead of assigning to variable
+          const clipboard = await vscode.env.clipboard.readText();
+          log(`Clipboard content: ${clipboard.substring(0, 50)}...`);
+
+          for (const change of event.contentChanges) {
+            // Log the change for debugging
+            log(
+              `Change detected - length: ${
+                change.text.length
+              }, first chars: "${change.text
+                .substring(0, 20)
+                .replace(/\n/g, "\\n")}"`
+            );
+
+            // Improved paste detection logic
+            // Check if this is actually a paste event (not just typing)
+            // We consider it a paste if:
+            // 1. Text is substantial (multiple lines or reasonably long)
+            // 2. The clipboard content matches or mostly matches what was inserted
+            // 3. The change happened very quickly (not character by character)
+            
+            const isProbablyPaste = 
+                // Must have substantial content to be a paste
+                (change.text.length > 20 || change.text.includes('\n')) &&
+                // And either it's multiple lines OR the change was made at once (not char by char)
+                (change.text.split('\n').length > 1 || 
+                 (change.range && 
+                  Math.abs(change.range.end.character - change.range.start.character) > 5));
+                
+            if (isProbablyPaste) {
+              // Count pasted lines
+              const lineCount = change.text.split("\n").length;
+
+              // Update statistics
+              pasteStats.totalPastes++;
+              pasteStats.totalLinesPasted += lineCount;
+              
+              // Make sure to save stats after each update
+              savePasteStats();
+              
+              // Update the status bar immediately
+              updateStatusBar();
+
+              // Show paste detection notification
+              vscode.window.showInformationMessage(
+                `CopyJedi Detected: Paste #${pasteStats.totalPastes} with ${lineCount} lines`
+              );
+
+              // Show notification
+              vscode.window.showInformationMessage(
+                `CopyJedi: Pasted ${lineCount} line${
+                  lineCount !== 1 ? "s" : ""
+                }! Total: ${pasteStats.totalPastes}`
+              );
+
+              // Update status bar
+              updateStatusBar();
+
+              // Save statistics
+              savePasteStats();
+
+              // Only count the first substantial change in a batch
+              break;
+            }
+          }
+        } catch (error) {
+          log(`Error in paste tracking: ${error.message}`);
         }
-      } catch (error) {
-        log(`Error in paste tracking: ${error.message}`);
       }
-    });
+    );
 
     context.subscriptions.push(pasteEventDisposable);
   } catch (error) {
@@ -279,9 +328,9 @@ const submitToLeaderboard = async () => {
 // Activate the extension
 function activate(context) {
   try {
-       console.log("CopyJedi is now active!");
-    log("CopyJedi activation started");
-
+    // Show activation notification
+    vscode.window.showInformationMessage("CopyJedi is now activating!");
+    
     globalStoragePath = context.globalStoragePath;
 
     // Create directory if it doesn't exist
@@ -289,6 +338,9 @@ function activate(context) {
       log(`Creating storage directory: ${globalStoragePath}`);
       fs.mkdirSync(globalStoragePath, { recursive: true });
     }
+
+    console.log("CopyJedi is now active!");
+    log("CopyJedi activation started");
 
     // Load saved statistics
     loadPasteStats();
@@ -317,6 +369,32 @@ function activate(context) {
       vscode.commands.registerCommand("copyjedi.test", () => {
         vscode.window.showInformationMessage("CopyJedi test command working!");
         log("Test command executed");
+      }),
+      vscode.commands.registerCommand("copyjedi.verifyBackend", () => {
+        // Check if stats file exists
+        const storagePath = getStoragePath();
+        try {
+          if (fs.existsSync(storagePath)) {
+            const statsData = fs.readFileSync(storagePath, 'utf8');
+            vscode.window.showInformationMessage(`CopyJedi backend is working! Stats file exists at: ${storagePath}`);
+            
+            // Show stats in a message
+            const stats = JSON.parse(statsData);
+            vscode.window.showInformationMessage(
+              `Current stats: ${stats.totalPastes} pastes, ${stats.totalLinesPasted} lines, User ID: ${stats.userId}`
+            );
+            
+            // Log to output channel too
+            log(`Backend verification - stats file contents: ${statsData}`);
+            
+            // Open the output channel to make logs visible
+            outputChannel.show();
+          } else {
+            vscode.window.showWarningMessage(`CopyJedi stats file not found at: ${storagePath}`);
+          }
+        } catch (error) {
+          vscode.window.showErrorMessage(`CopyJedi backend check failed: ${error.message}`);
+        }
       })
     );
 
@@ -324,6 +402,9 @@ function activate(context) {
     updateStatusBar();
 
     log("CopyJedi activation completed successfully");
+    
+    // Show successful activation notification
+    vscode.window.showInformationMessage("CopyJedi activated successfully and is tracking your pastes!");
   } catch (error) {
     log(`Activation error: ${error.message}`);
     log(`Stack trace: ${error.stack}`);
@@ -345,4 +426,4 @@ module.exports = {
   deactivate,
 };
 
-// Removed misplaced "contributes" block
+

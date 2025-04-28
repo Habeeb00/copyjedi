@@ -2,7 +2,7 @@
 // that can be integrated into the extension in the future
 
 const vscode = require('vscode');
-const axios = require('axios'); // You would need to add axios as a dependency
+// Using the fetch API available in the VS Code extension host environment
 
 class LeaderboardClient {
     constructor(context) {
@@ -38,7 +38,12 @@ class LeaderboardClient {
         }
 
         try {
-            const response = await axios.post(`${this.apiUrl}/submit`, {
+            const response = await fetch(`${this.apiUrl}/submit`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
                 userId: stats.userId,
                 totalPastes: stats.totalPastes,
                 totalLinesPasted: stats.totalLinesPasted,
@@ -47,9 +52,10 @@ class LeaderboardClient {
                 os: process.platform,
                 vsCodeVersion: vscode.version,
                 // Don't collect any personally identifiable information
+            }),
             });
 
-            if (response.status === 200) {
+            if (response.ok) {
                 vscode.window.showInformationMessage('CopyJedi: Stats submitted to leaderboard successfully!');
                 return true;
             } else {
@@ -65,8 +71,8 @@ class LeaderboardClient {
     // Get current leaderboard data
     async getLeaderboard() {
         try {
-            const response = await axios.get(`${this.apiUrl}/leaderboard`);
-            return response.data;
+            const response = await fetch(`${this.apiUrl}/leaderboard`);
+            return await response.json();
         } catch (error) {
             vscode.window.showErrorMessage(`CopyJedi: Error fetching leaderboard - ${error.message}`);
             return null;

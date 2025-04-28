@@ -48,7 +48,11 @@ const PasteStatsSchema = new mongoose.Schema({
 const PasteStats = mongoose.model("PasteStats", PasteStatsSchema);
 
 // Middleware
-app.use(cors());
+app.use(
+  cors({
+    origin: ["http://localhost:3000", "https://your-production-domain.com"],
+  })
+);
 app.use(express.json());
 
 // API Routes
